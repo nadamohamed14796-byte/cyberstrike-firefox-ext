@@ -595,3 +595,10 @@ details[open] .server-auth-toggle::before {
 ::-webkit-scrollbar-thumb:hover {
   background: #3d3d5a;
 }
+
+
+.session-safety-note {
+  color: #aeb8d4;
+  line-height: 1.45;
+  margin-top: 6px;
+}
