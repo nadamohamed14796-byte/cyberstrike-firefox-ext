@@ -471,32 +471,34 @@ toggleBtn.addEventListener("click", async () => {
     const serverVal = serverUrlInput.value.trim() || "http://127.0.0.1:4096";
     const usernameVal = serverUsernameInput.value.trim();
     const passwordVal = serverPasswordInput.value;
-    // Always capture into a dedicated session. Reusing the selected session can
-    // inject proxy analysis into an active recon run and interrupt its workflow.
-    let selectedSessionID = null;
+    // Reuse the explicitly selected session so captured traffic stays with
+    // the active target. Create a session only when "-- New Session --" is selected.
+    let selectedSessionID = sessionSelect.value || null;
 
     serverAuthHeaders = buildAuthHeaders(usernameVal, passwordVal);
     await browser.storage.local.set({ scope: scopeVal, serverUrl: serverVal, serverUsername: usernameVal, serverPassword: passwordVal });
 
-    try {
-      const createResp = await fetch(`${serverVal}/session`, {
-        method: "POST",
-        headers: { ...serverAuthHeaders, "Content-Type": "application/json" },
-        body: JSON.stringify({}),
-      });
-      if (!createResp.ok) {
-        const errorText = await createResp.text().catch(() => "");
-        throw new Error(`Session creation failed (${createResp.status}): ${errorText.slice(0, 160)}`);
+    if (!selectedSessionID) {
+      try {
+        const createResp = await fetch(`${serverVal}/session`, {
+          method: "POST",
+          headers: { ...serverAuthHeaders, "Content-Type": "application/json" },
+          body: JSON.stringify({}),
+        });
+        if (!createResp.ok) {
+          const errorText = await createResp.text().catch(() => "");
+          throw new Error(`Session creation failed (${createResp.status}): ${errorText.slice(0, 160)}`);
+        }
+        const newSession = await createResp.json();
+        if (!newSession || !newSession.id) {
+          throw new Error("Server did not return a session ID");
+        }
+        selectedSessionID = newSession.id;
+      } catch (err) {
+        console.error("Failed to create capture session:", err);
+        alert("Failed to create a capture session. Check the CyberStrike server and try again.");
+        return;
       }
-      const newSession = await createResp.json();
-      if (!newSession || !newSession.id) {
-        throw new Error("Server did not return a session ID");
-      }
-      selectedSessionID = newSession.id;
-    } catch (err) {
-      console.error("Failed to create dedicated capture session:", err);
-      alert("Failed to create a dedicated capture session. Check the CyberStrike server and try again.");
-      return;
     }
 
     const response = await browser.runtime.sendMessage({
