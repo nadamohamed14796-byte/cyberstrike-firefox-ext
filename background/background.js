@@ -49,9 +49,10 @@ const COMMON_AUTH_HEADERS = [
 // File extensions to filter out
 const FILTERED_EXTENSIONS = [
   ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp",
-  ".css", ".js", ".mjs",
+  ".css",
+  // JavaScript bundles, modules, and source maps are intentionally captured.
+  // CyberStrike correlates these responses with observed API requests/endpoints.
   ".woff", ".woff2", ".ttf", ".eot", ".otf",
-  ".map",
   ".mp4", ".mp3", ".avi", ".mov", ".webm",
   ".pdf", ".zip", ".gz", ".br",
 ];
