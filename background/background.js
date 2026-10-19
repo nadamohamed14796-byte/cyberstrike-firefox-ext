@@ -543,7 +543,28 @@ function onErrorOccurred(details) {
 // --- Capture Control ---
 
 function startCapture(options = {}) {
-  if (isCapturing) return;
+  // A repeated start may switch scope/session while listeners are already active.
+  // Update the active context without registering duplicate listeners.
+  if (isCapturing) {
+    if (
+      Object.prototype.hasOwnProperty.call(options, "sessionID") &&
+      options.sessionID !== sessionID
+    ) {
+      sessionID = options.sessionID || null;
+      sessionInitPromise = null;
+      requestCount = 0;
+      serverSupportsResponse = true;
+    }
+
+    browser.storage.local.set({
+      isCapturing: true,
+      scope,
+      serverUrl,
+      activeSessionID: sessionID,
+      containerCredentials,
+    });
+    return;
+  }
 
   console.log(`CyberStrike: START scope="${scope}" server="${serverUrl}" session=${options.sessionID || "new"}`);
   isCapturing = true;
