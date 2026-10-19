@@ -40,3 +40,59 @@ test("continues filtering non-analysis static assets", () => {
     assert.equal(context.shouldFilter(url), true, url);
   }
 });
+
+
+test("switches the active session without registering duplicate listeners", () => {
+  const listenerCalls = [];
+  const writes = [];
+  const event = {
+    addListener: (...args) => listenerCalls.push(["add", ...args]),
+    removeListener: (...args) => listenerCalls.push(["remove", ...args]),
+  };
+  const browser = {
+    webRequest: {
+      onBeforeRequest: event,
+      onBeforeSendHeaders: event,
+      onHeadersReceived: event,
+      onCompleted: event,
+      onErrorOccurred: event,
+    },
+    storage: { local: { set: (value) => { writes.push(value); return Promise.resolve(); } } },
+  };
+  const start = source.indexOf("function startCapture(options = {})");
+  const end = source.indexOf("function stopCapture", start);
+  assert.notEqual(start, -1, "startCapture function must exist");
+  assert.notEqual(end, -1, "stopCapture must follow startCapture");
+
+  const context = vm.createContext({
+    browser,
+    console,
+    isCapturing: false,
+    sessionID: null,
+    sessionInitPromise: null,
+    serverUrl: "http://127.0.0.1:4096",
+    scope: "first.example",
+    requestCount: 0,
+    containerCredentials: {},
+    serverSupportsResponse: true,
+  });
+  vm.runInContext(source.slice(start, end), context, {
+    filename: "background/start-capture-under-test.js",
+  });
+
+  context.startCapture({ sessionID: "session-one" });
+  const firstListenerCount = listenerCalls.filter(([action]) => action === "add").length;
+  context.scope = "second.example";
+  context.startCapture({ sessionID: "session-two" });
+
+  assert.equal(context.sessionID, "session-two");
+  assert.equal(context.scope, "second.example");
+  assert.equal(context.requestCount, 0);
+  assert.equal(
+    listenerCalls.filter(([action]) => action === "add").length,
+    firstListenerCount,
+    "restarting while capturing must not add duplicate listeners",
+  );
+  assert.equal(writes.at(-1).activeSessionID, "session-two");
+  assert.equal(writes.at(-1).scope, "second.example");
+});
