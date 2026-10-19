@@ -75,6 +75,11 @@ test("switches the active session without registering duplicate listeners", () =
     requestCount: 0,
     containerCredentials: {},
     serverSupportsResponse: true,
+    onBeforeRequest() {},
+    onBeforeSendHeaders() {},
+    onHeadersReceived() {},
+    onCompleted() {},
+    onErrorOccurred() {},
   });
   vm.runInContext(source.slice(start, end), context, {
     filename: "background/start-capture-under-test.js",
