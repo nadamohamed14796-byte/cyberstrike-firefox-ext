@@ -57,9 +57,6 @@ const FILTERED_EXTENSIONS = [
   ".pdf", ".zip", ".gz", ".br",
 ];
 
-// Max response body to capture (before truncation on backend)
-const MAX_RESPONSE_CAPTURE = 500 * 1024; // 500 KB
-
 // Request timeout - if response doesn't arrive in this time, send without it
 const REQUEST_TIMEOUT = 30000; // 30 seconds
 
@@ -362,6 +359,12 @@ function completeRequest(requestId) {
   });
 }
 
+function appendResponseChunk(responseData, chunk) {
+  if (!responseData || !chunk) return;
+  responseData.totalSize += chunk.byteLength;
+  responseData.chunks.push(new Uint8Array(chunk));
+}
+
 function combineChunks(chunks) {
   if (!chunks || chunks.length === 0) return "";
   
@@ -459,7 +462,6 @@ function onHeadersReceived(details) {
     headers: headers,
     chunks: [],
     totalSize: 0,
-    stopped: false,
   });
 
   // Start capturing response body
@@ -476,17 +478,9 @@ function onHeadersReceived(details) {
       // Always pass through the data
       filter.write(event.data);
 
-      // Capture if not stopped
-      if (!responseData.stopped) {
-        responseData.totalSize += event.data.byteLength;
-
-        if (responseData.totalSize <= MAX_RESPONSE_CAPTURE) {
-          responseData.chunks.push(new Uint8Array(event.data));
-        } else {
-          // Stop capturing but continue passing through
-          responseData.stopped = true;
-        }
-      }
+      // Preserve the complete response for endpoint and JavaScript analysis.
+      // The page still receives each chunk immediately; only the capture is buffered.
+      appendResponseChunk(responseData, event.data);
     };
 
     filter.onstop = () => {
