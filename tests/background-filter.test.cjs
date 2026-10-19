@@ -101,3 +101,27 @@ test("switches the active session without registering duplicate listeners", () =
   assert.equal(writes.at(-1).activeSessionID, "session-two");
   assert.equal(writes.at(-1).scope, "second.example");
 });
+
+
+test("retains response bodies larger than the former 500 KB capture cap", () => {
+  const start = source.indexOf("function appendResponseChunk");
+  const end = source.indexOf("function combineChunks", start);
+  assert.notEqual(start, -1, "appendResponseChunk helper must exist");
+  assert.notEqual(end, -1, "combineChunks must follow appendResponseChunk");
+  const context = vm.createContext({ Uint8Array });
+  vm.runInContext(source.slice(start, end), context, {
+    filename: "background/response-chunk-under-test.js",
+  });
+
+  const chunk = new Uint8Array(768 * 1024);
+  chunk[0] = 65;
+  chunk[chunk.length - 1] = 90;
+  const responseData = { chunks: [], totalSize: 0 };
+  context.appendResponseChunk(responseData, chunk);
+
+  assert.equal(responseData.totalSize, 768 * 1024);
+  assert.equal(responseData.chunks.length, 1);
+  assert.equal(responseData.chunks[0].byteLength, 768 * 1024);
+  assert.equal(responseData.chunks[0][0], 65);
+  assert.equal(responseData.chunks[0][responseData.chunks[0].length - 1], 90);
+});
