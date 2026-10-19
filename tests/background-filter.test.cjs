@@ -13,7 +13,7 @@ const end = source.indexOf("function normalizeScope", start);
 assert.notEqual(start, -1, "extension filter declaration must exist");
 assert.notEqual(end, -1, "shouldFilter function must exist after filter declaration");
 
-const context = vm.createContext({});
+const context = vm.createContext({ URL });
 vm.runInContext(source.slice(start, end), context, {
   filename: "background/filter-under-test.js",
 });
