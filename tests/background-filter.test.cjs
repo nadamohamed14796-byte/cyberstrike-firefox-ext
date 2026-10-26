@@ -309,10 +309,10 @@ test("response capture filter is attached before cached responses are read", () 
 });
 
 test("response filter failure disconnects instead of truncating the page", () => {
-  const start = source.indexOf("function onHeadersReceived(details)");
+  const start = source.indexOf("function startResponseCapture(requestId, responseData)");
   const end = source.indexOf("function onCompleted(details)", start);
-  assert.notEqual(start, -1, "onHeadersReceived must exist");
-  assert.notEqual(end, -1, "onCompleted must follow onHeadersReceived");
+  assert.notEqual(start, -1, "response capture helper must exist");
+  assert.notEqual(end, -1, "onCompleted must follow response handlers");
 
   const completed = [];
   const closes = [];
@@ -322,30 +322,34 @@ test("response filter failure disconnects instead of truncating the page", () =>
     close() { closes.push(true); },
     disconnect() { disconnects.push(true); },
   };
+  const responseData = { status: null, headers: {}, chunks: [], totalSize: 0 };
   const pendingRequests = new Map([
     ["req-1", { rawRequest: "GET / HTTP/1.1", containerId: "firefox-default", scheme: "https" }],
   ]);
-  const pendingResponses = new Map();
+  const pendingResponses = new Map([["req-1", responseData]]);
+  const pendingResponseFilters = new Map();
   const context = vm.createContext({
     browser: { webRequest: { filterResponseData: () => filter } },
     console: { log() {}, error() {} },
     isCapturing: true,
     pendingRequests,
     pendingResponses,
+    pendingResponseFilters,
     extractResponseHeaders: () => ({}),
     appendResponseChunk() {},
-    completeRequest: (id) => completed.push(id),
+    completeRequest: (id, includeResponse = true) => completed.push({ id, includeResponse }),
   });
   vm.runInContext(source.slice(start, end), context, {
     filename: "background/filter-error-under-test.js",
   });
 
+  context.startResponseCapture("req-1", responseData);
   context.onHeadersReceived({ requestId: "req-1", statusCode: 200, responseHeaders: [] });
   filter.onerror(new Error("capture failed"));
 
   assert.deepEqual(disconnects, [true]);
   assert.deepEqual(closes, []);
-  assert.deepEqual(completed, ["req-1"]);
+  assert.deepEqual(completed, [{ id: "req-1", includeResponse: false }]);
 });
 
 test("unauthorized ingest response does not disable response capture", async () => {
