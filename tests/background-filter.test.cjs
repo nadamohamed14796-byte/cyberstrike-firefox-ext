@@ -206,6 +206,7 @@ test("stopping capture disconnects in-flight filters and releases pending buffer
     pendingBodies: new Map([["req-1", "body"]]),
     pendingRequests: new Map([["req-1", { filter }]]),
     pendingResponses: new Map([["req-1", { chunks: [new Uint8Array([1])], totalSize: 1 }]]),
+    pendingResponseFilters: new Map([["req-1", filter]]),
     onBeforeRequest() {},
     onBeforeSendHeaders() {},
     onHeadersReceived() {},
@@ -227,10 +228,84 @@ test("stopping capture disconnects in-flight filters and releases pending buffer
   assert.equal(context.pendingBodies.size, 0);
   assert.equal(context.pendingRequests.size, 0);
   assert.equal(context.pendingResponses.size, 0);
+  assert.equal(context.pendingResponseFilters.size, 0);
   assert.equal(disconnected.length, 1);
   assert.equal(removed.length, 5);
   assert.equal(writes.at(-1).isCapturing, false);
   assert.equal(Object.keys(writes.at(-1).containerCredentials).length, 0);
+});
+
+test("response capture filter is attached before cached responses are read", () => {
+  const start = source.indexOf("function startResponseCapture(requestId, responseData)");
+  const end = source.indexOf("function onCompleted(details)", start);
+  assert.notEqual(start, -1, "early response capture helper must exist");
+  assert.notEqual(end, -1, "onCompleted must follow request/response handlers");
+
+  const filters = [];
+  const written = [];
+  const filter = {
+    write: (chunk) => written.push(new Uint8Array(chunk)),
+    close() {},
+    disconnect() {},
+  };
+  const pendingRequests = new Map();
+  const pendingBodies = new Map();
+  const pendingResponses = new Map();
+  const pendingResponseFilters = new Map();
+  const context = vm.createContext({
+    browser: { webRequest: { filterResponseData: (requestID) => { filters.push(requestID); return filter; } } },
+    console: { log() {}, error() {} },
+    isCapturing: true,
+    pendingRequests,
+    pendingBodies,
+    pendingResponses,
+    pendingResponseFilters,
+    shouldFilter: () => false,
+    matchesScope: () => true,
+    extractRequestBody: () => null,
+    extractResponseHeaders: () => ({ "content-type": "application/javascript" }),
+    buildRawRequest: () => "GET /app.js HTTP/1.1",
+    extractAuthHeaders: () => ({}),
+    headersChanged: () => false,
+    containerCredentials: {},
+    syncCredentialHeaders() {},
+    completeRequest() {},
+    appendResponseChunk(responseData, chunk) {
+      responseData.totalSize += chunk.byteLength;
+      responseData.chunks.push(new Uint8Array(chunk));
+    },
+  });
+  vm.runInContext(source.slice(start, end), context, {
+    filename: "background/early-response-capture-under-test.js",
+  });
+
+  context.onBeforeRequest({
+    requestId: "script-1",
+    url: "https://target.example/assets/app.js",
+    method: "GET",
+    type: "script",
+  });
+  assert.deepEqual(filters, ["script-1"]);
+  assert.ok(pendingResponseFilters.has("script-1"), "filter should exist before response headers");
+
+  pendingRequests.set("script-1", {
+    rawRequest: "GET /assets/app.js HTTP/1.1",
+    containerId: "firefox-default",
+    scheme: "https",
+    filter,
+  });
+  context.onHeadersReceived({
+    requestId: "script-1",
+    statusCode: 200,
+    responseHeaders: [{ name: "Content-Type", value: "application/javascript" }],
+  });
+  assert.deepEqual(filters, ["script-1"], "headers handling must reuse the early filter");
+
+  const chunk = new TextEncoder().encode("const answer = 42;");
+  filter.ondata({ data: chunk });
+  assert.equal(written.length, 1);
+  assert.equal(new TextDecoder().decode(written[0]), "const answer = 42;");
+  assert.equal(pendingResponses.get("script-1").totalSize, chunk.byteLength);
 });
 
 test("response filter failure disconnects instead of truncating the page", () => {
