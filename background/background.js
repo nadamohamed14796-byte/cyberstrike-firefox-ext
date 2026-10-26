@@ -308,8 +308,9 @@ async function sendIngest(rawRequest, sid, credentialID, response, scheme) {
     body: payloadJSON,
   });
 
-  // If server returned 500 and we sent response data, retry without it
-  if (!fetchResponse.ok && response && serverSupportsResponse) {
+  // Only retry without the body for the server error this compatibility fallback targets.
+  // Auth/scope/client errors must stay visible and must not disable response capture.
+  if (fetchResponse.status === 500 && response && serverSupportsResponse) {
     console.log("CyberStrike: [INGEST] server rejected response data, retrying without it");
     serverSupportsResponse = false;
     delete payload.response;
@@ -524,8 +525,10 @@ function onHeadersReceived(details) {
       if (filterDone) return;
       filterDone = true;
       console.error("CyberStrike: Filter error", e);
-      try { filter.close(); } catch {}
-      // Send without response body
+      // Preserve the page response if capture failed; close() would drop bytes
+      // that have not already reached the renderer. disconnect() passes the rest through.
+      try { filter.disconnect(); } catch {}
+      // Send the request without the incomplete response body.
       completeRequest(details.requestId);
     };
   } catch (err) {
