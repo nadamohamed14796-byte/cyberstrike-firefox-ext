@@ -85,6 +85,23 @@ function normalizeScope(input) {
   return s;
 }
 
+function normalizeServerUrl(input) {
+  try {
+    const url = new URL((input || "http://127.0.0.1:4096").trim());
+    if (
+      (url.protocol !== "http:" && url.protocol !== "https:") ||
+      url.username ||
+      url.password ||
+      url.search ||
+      url.hash
+    ) return "";
+    const pathname = url.pathname.replace(/\/+$/, "");
+    return url.origin + pathname;
+  } catch {
+    return "";
+  }
+}
+
 function matchesScope(url) {
   if (!scope) return false;
   try {
@@ -92,12 +109,12 @@ function matchesScope(url) {
     if (!hostname) return false;
     hostname = hostname.toLowerCase().replace(/\.+$/, "");
 
-    // scope is pre-normalized via normalizeScope()
+    // Match exactly by default. Subdomains require an explicit wildcard.
     if (scope.startsWith("*.")) {
       const domain = scope.slice(2);
-      return hostname === domain || hostname.endsWith("." + domain);
+      return hostname !== domain && hostname.endsWith("." + domain);
     }
-    return hostname === scope || hostname.endsWith("." + scope);
+    return hostname === scope;
   } catch {
     return false;
   }
@@ -105,7 +122,8 @@ function matchesScope(url) {
 
 function buildRawRequest(details, headers) {
   const urlObj = new URL(details.url);
-  const path = urlObj.pathname + urlObj.search + urlObj.hash;
+  // URL fragments never travel in HTTP requests; do not invent a fragment-bearing request target.
+  const path = urlObj.pathname + urlObj.search;
 
   let raw = `${details.method} ${path} HTTP/1.1\r\n`;
 
@@ -335,7 +353,13 @@ async function sendIngest(rawRequest, sid, credentialID, response) {
 
 function completeRequest(requestId) {
   const pending = pendingRequests.get(requestId);
-  if (!pending) return;
+  if (!pending) {
+    // A stop/session switch may have disconnected this request while browser callbacks
+    // were still queued. Clean late response/request state rather than leaking it.
+    pendingResponses.delete(requestId);
+    pendingBodies.delete(requestId);
+    return;
+  }
 
   pendingRequests.delete(requestId);
 
@@ -618,10 +642,17 @@ function stopCapture(clearSession = true) {
   browser.webRequest.onHeadersReceived.removeListener(onHeadersReceived);
   browser.webRequest.onCompleted.removeListener(onCompleted);
   browser.webRequest.onErrorOccurred.removeListener(onErrorOccurred);
-  
-  pendingBodies.clear();
+
+  // Stop filtering in-flight responses before releasing their buffers. Clearing
+  // the maps first makes any late onstop/onerror callback harmless.
+  const pending = Array.from(pendingRequests.values());
   pendingRequests.clear();
   pendingResponses.clear();
+  pendingBodies.clear();
+  for (const request of pending) {
+    if (!request.filter) continue;
+    try { request.filter.disconnect(); } catch {}
+  }
 
   if (clearSession) {
     sessionID = null;
@@ -634,7 +665,7 @@ function stopCapture(clearSession = true) {
   browser.storage.local.set({
     isCapturing: false,
     activeSessionID: null,
-    containerCredentials: {},
+    containerCredentials,
   });
 }
 
@@ -643,10 +674,21 @@ function stopCapture(clearSession = true) {
 browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
   switch (message.type) {
     case "start": {
-      scope = normalizeScope(message.scope || "");
-      serverUrl = message.serverUrl || "http://127.0.0.1:4096";
+      const nextScope = normalizeScope(message.scope || "");
+      const nextServerUrl = normalizeServerUrl(message.serverUrl || "http://127.0.0.1:4096");
+      const sid = message.sessionID || null;
+      if (!nextScope || !nextServerUrl) {
+        sendResponse({ ok: false, error: "Enter a valid exact domain/wildcard and an HTTP(S) server URL without credentials, query, or fragment." });
+        break;
+      }
+      // Never let in-flight traffic from the previous capture context be attached
+      // to a newly selected target/session.
+      if (isCapturing && (scope !== nextScope || serverUrl !== nextServerUrl || sessionID !== sid)) {
+        stopCapture(false);
+      }
+      scope = nextScope;
+      serverUrl = nextServerUrl;
       serverAuthHeaders = buildAuthHeaders(message.serverUsername, message.serverPassword);
-      const sid = message.sessionID;
       if (sid) {
         applySessionCredentials(sid)
           .then(() => {
@@ -662,6 +704,8 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
           });
         return true;
       }
+      containerCredentials = {};
+      browser.storage.local.set({ containerCredentials }).catch(() => {});
       startCapture({ sessionID: null });
       sendResponse({ ok: true, capturing: true });
       break;
@@ -683,10 +727,19 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
       });
       break;
 
-    case "attachSession":
+    case "attachSession": {
+      const nextScope = normalizeScope(message.scope || scope);
+      const nextServerUrl = normalizeServerUrl(message.serverUrl || serverUrl);
+      if (!message.sessionID || !nextScope || !nextServerUrl) {
+        sendResponse({ ok: false, error: "A session ID, valid scope, and HTTP(S) server URL are required." });
+        break;
+      }
+      if (isCapturing && (sessionID !== message.sessionID || scope !== nextScope || serverUrl !== nextServerUrl)) {
+        stopCapture(false);
+      }
       sessionID = message.sessionID;
-      serverUrl = message.serverUrl || serverUrl;
-      scope = normalizeScope(message.scope) || scope;
+      serverUrl = nextServerUrl;
+      scope = nextScope;
 
       applySessionCredentials(message.sessionID)
         .then((creds) => {
@@ -697,6 +750,7 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
           sendResponse({ ok: false, error: err.message });
         });
       return true;
+    }
 
     case "addCredential":
       createCredentialOnServer(message).then((cred) => {
