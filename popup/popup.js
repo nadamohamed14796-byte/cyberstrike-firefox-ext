@@ -41,6 +41,33 @@ function buildAuthHeaders(username, password) {
   return { Authorization: "Basic " + btoa(`${username || "cyberstrike"}:${password}`) };
 }
 
+function normalizeServerUrl(input) {
+  try {
+    const url = new URL((input || "http://127.0.0.1:4096").trim());
+    if (
+      (url.protocol !== "http:" && url.protocol !== "https:") ||
+      url.username ||
+      url.password ||
+      url.search ||
+      url.hash
+    ) return "";
+    return url.origin + url.pathname.replace(/\\/+$/, "");
+  } catch {
+    return "";
+  }
+}
+
+// Escape untrusted values before inserting server/browser data into popup HTML.
+function escapeHTML(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (char) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  })[char]);
+}
+
 // --- State ---
 let capturing = false;
 let currentSessionID = null;
@@ -82,7 +109,11 @@ async function loadSavedSettings() {
 // --- Session Management ---
 
 async function loadSessions(activeSessionID = null) {
-  const serverUrl = serverUrlInput.value.trim() || "http://127.0.0.1:4096";
+  const serverUrl = normalizeServerUrl(serverUrlInput.value);
+  if (!serverUrl) {
+    console.error("Invalid CyberStrike server URL");
+    return;
+  }
 
   try {
     const response = await fetch(`${serverUrl}/session?limit=20&roots=true`, {
@@ -236,10 +267,10 @@ function renderCredentialMappings() {
     item.innerHTML = `
       <div class="cred-status ${statusDot}"></div>
       <div class="cred-info">
-        <div class="cred-name">${cred.label}</div>
-        <div class="cred-meta">${containerName} ${hasHeaders ? `(${headerCount} headers)` : "(waiting for login)"}</div>
+        <div class="cred-name">${escapeHTML(cred.label)}</div>
+        <div class="cred-meta">${escapeHTML(containerName)} ${hasHeaders ? `(${headerCount} headers)` : "(waiting for login)"}</div>
       </div>
-      <button class="btn-icon btn-remove" data-cred-id="${cred.credentialID}" title="Remove">&#10005;</button>
+      <button class="btn-icon btn-remove" data-cred-id="${escapeHTML(cred.credentialID)}" title="Remove">&#10005;</button>
     `;
 
     credentialList.appendChild(item);
@@ -255,7 +286,7 @@ function renderCredentialMappings() {
 }
 
 function getContainerName(containerId) {
-  const option = credContainer.querySelector(`option[value="${containerId}"]`);
+  const option = Array.from(credContainer.options).find((item) => item.value === containerId);
   return option ? option.textContent : containerId;
 }
 
@@ -415,22 +446,22 @@ function renderList(type, items, renderer) {
 }
 
 function renderCredential(c) {
-  const roleInfo = c.role_id ? `<span class="tag">${c.role_id}</span>` : "";
+  const roleInfo = c.role_id ? `<span class="tag">${escapeHTML(c.role_id)}</span>` : "";
   const hasHeaders = c.headers && Object.keys(c.headers).length > 0;
   const status = hasHeaders ? "active" : "pending";
   const headerKeys = hasHeaders ? Object.keys(c.headers).join(", ") : "No headers";
   return `
     <div class="item-row">
       <span class="cred-dot ${status}"></span>
-      <div class="item-header">${c.label}</div>
+      <div class="item-header">${escapeHTML(c.label)}</div>
     </div>
-    <div class="item-meta">${headerKeys}${roleInfo}</div>
+    <div class="item-meta">${escapeHTML(headerKeys)}${roleInfo}</div>
   `;
 }
 
 function renderRole(r) {
-  return `<div class="item-header">${r.name}</div>
-    <div class="item-meta">${r.permissions || "No permissions defined"}</div>`;
+  return `<div class="item-header">${escapeHTML(r.name)}</div>
+    <div class="item-meta">${escapeHTML(r.permissions || "No permissions defined")}</div>`;
 }
 
 function renderObject(o) {
@@ -442,16 +473,16 @@ function renderObject(o) {
       fields = o.fields;
     }
   }
-  return `<div class="item-header">${o.name}</div>
-    <div class="item-meta">${fields || "No fields"}</div>`;
+  return `<div class="item-header">${escapeHTML(o.name)}</div>
+    <div class="item-meta">${escapeHTML(fields || "No fields")}</div>`;
 }
 
 function renderFunction(f) {
   const method = f.method
-    ? `<span class="tag tag-method">${f.method}</span>`
+    ? `<span class="tag tag-method">${escapeHTML(f.method)}</span>`
     : "";
-  return `<div class="item-header">${f.name}</div>
-    <div class="item-meta">${method} ${f.endpoint || ""}</div>`;
+  return `<div class="item-header">${escapeHTML(f.name)}</div>
+    <div class="item-meta">${method} ${escapeHTML(f.endpoint || "")}</div>`;
 }
 
 // --- Event Handlers ---
@@ -468,7 +499,13 @@ toggleBtn.addEventListener("click", async () => {
       return;
     }
 
-    const serverVal = serverUrlInput.value.trim() || "http://127.0.0.1:4096";
+    const serverVal = normalizeServerUrl(serverUrlInput.value);
+    if (!serverVal) {
+      alert("Enter a valid HTTP(S) CyberStrike server URL without credentials, query, or fragment.");
+      serverUrlInput.focus();
+      return;
+    }
+    serverUrlInput.value = serverVal;
     const usernameVal = serverUsernameInput.value.trim();
     const passwordVal = serverPasswordInput.value;
     // Reuse the explicitly selected session so captured traffic stays with
@@ -510,6 +547,10 @@ toggleBtn.addEventListener("click", async () => {
       serverPassword: passwordVal,
     });
 
+    if (!response?.ok) {
+      alert(response?.error || "Failed to start capture. Check the scope, server URL, and server status.");
+      return;
+    }
     if (response.ok) {
       // Get fresh status from background
       const status = await browser.runtime.sendMessage({ type: "getStatus" });
