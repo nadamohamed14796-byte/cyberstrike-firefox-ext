@@ -20,6 +20,8 @@ let pendingRequests = new Map();
 // Response data collected from filterResponseData
 // { requestId: { status, headers, chunks, totalSize } }
 let pendingResponses = new Map();
+// Filters are created in onBeforeRequest so cached script responses are capturable.
+let pendingResponseFilters = new Map();
 
 // Container → Credential mapping
 let containerCredentials = {};
@@ -356,19 +358,20 @@ async function sendIngest(rawRequest, sid, credentialID, response, scheme) {
 
 // --- Complete Request with Response ---
 
-function completeRequest(requestId) {
+function completeRequest(requestId, includeResponse = true) {
   const pending = pendingRequests.get(requestId);
+  pendingResponseFilters.delete(requestId);
+  pendingBodies.delete(requestId);
   if (!pending) {
     // A stop/session switch may have disconnected this request while browser callbacks
     // were still queued. Clean late response/request state rather than leaking it.
     pendingResponses.delete(requestId);
-    pendingBodies.delete(requestId);
     return;
   }
 
   pendingRequests.delete(requestId);
 
-  const responseData = pendingResponses.get(requestId);
+  const responseData = includeResponse ? pendingResponses.get(requestId) : undefined;
   pendingResponses.delete(requestId);
 
   let response = null;
@@ -415,6 +418,48 @@ function combineChunks(chunks) {
 
 // --- WebRequest Handlers ---
 
+function startResponseCapture(requestId, responseData) {
+  if (pendingResponseFilters.has(requestId)) return pendingResponseFilters.get(requestId);
+
+  let filter;
+  try {
+    filter = browser.webRequest.filterResponseData(requestId);
+  } catch (err) {
+    console.error("CyberStrike: Failed to create response filter", err);
+    return null;
+  }
+
+  pendingResponseFilters.set(requestId, filter);
+  const pending = pendingRequests.get(requestId);
+  if (pending) pending.filter = filter;
+  let filterDone = false;
+
+  filter.ondata = (event) => {
+    // Always pass bytes through to the page unchanged while buffering the capture.
+    filter.write(event.data);
+    appendResponseChunk(responseData, event.data);
+  };
+
+  filter.onstop = () => {
+    if (filterDone) return;
+    filterDone = true;
+    try { filter.close(); } catch {}
+    completeRequest(requestId);
+  };
+
+  filter.onerror = (error) => {
+    if (filterDone) return;
+    filterDone = true;
+    console.error("CyberStrike: Filter error", error);
+    // disconnect preserves any remaining page response bytes; close() would discard them.
+    try { filter.disconnect(); } catch {}
+    // Captured chunks may be incomplete, so do not forward a partial response as complete.
+    completeRequest(requestId, false);
+  };
+
+  return filter;
+}
+
 function onBeforeRequest(details) {
   if (!isCapturing) return;
   if (shouldFilter(details.url)) return;
@@ -426,6 +471,15 @@ function onBeforeRequest(details) {
   if (body) {
     pendingBodies.set(details.requestId, body);
   }
+
+  const responseData = {
+    status: null,
+    headers: {},
+    chunks: [],
+    totalSize: 0,
+  };
+  pendingResponses.set(details.requestId, responseData);
+  startResponseCapture(details.requestId, responseData);
 }
 
 function onBeforeSendHeaders(details) {
@@ -464,6 +518,7 @@ function onBeforeSendHeaders(details) {
     containerId,
     scheme: new URL(details.url).protocol === "http:" ? "http" : "https",
     timestamp: Date.now(),
+    filter: pendingResponseFilters.get(details.requestId),
   });
 
   // Set timeout - if response doesn't arrive, send without it
@@ -475,7 +530,7 @@ function onBeforeSendHeaders(details) {
         try { timedOut.filter.disconnect(); } catch (e) {}
       }
       console.log(`CyberStrike: Request ${details.requestId} timed out waiting for response`);
-      completeRequest(details.requestId);
+      completeRequest(details.requestId, false);
     }
   }, REQUEST_TIMEOUT);
 }
@@ -484,60 +539,27 @@ function onHeadersReceived(details) {
   if (!isCapturing) return;
   if (!pendingRequests.has(details.requestId)) return;
 
-  // Store response headers
   const headers = extractResponseHeaders(details.responseHeaders);
-
-  pendingResponses.set(details.requestId, {
-    status: details.statusCode,
-    headers: headers,
+  const responseData = pendingResponses.get(details.requestId) || {
+    status: null,
+    headers: {},
     chunks: [],
     totalSize: 0,
-  });
+  };
+  responseData.status = details.statusCode;
+  responseData.headers = headers;
+  pendingResponses.set(details.requestId, responseData);
 
-  // Start capturing response body
-  try {
-    const filter = browser.webRequest.filterResponseData(details.requestId);
-    const responseData = pendingResponses.get(details.requestId);
-    let filterDone = false;
-
-    // Store filter ref so timeout can disconnect it
-    const pending = pendingRequests.get(details.requestId);
-    if (pending) pending.filter = filter;
-
-    filter.ondata = (event) => {
-      // Always pass through the data
-      filter.write(event.data);
-
-      // Preserve the complete response for endpoint and JavaScript analysis.
-      // The page still receives each chunk immediately; only the capture is buffered.
-      appendResponseChunk(responseData, event.data);
-    };
-
-    filter.onstop = () => {
-      if (filterDone) return;
-      filterDone = true;
-      filter.close();
-      // Response complete, send to server
-      completeRequest(details.requestId);
-    };
-
-    filter.onerror = (e) => {
-      if (filterDone) return;
-      filterDone = true;
-      console.error("CyberStrike: Filter error", e);
-      // Preserve the page response if capture failed; close() would drop bytes
-      // that have not already reached the renderer. disconnect() passes the rest through.
-      try { filter.disconnect(); } catch {}
-      // Send the request without the incomplete response body.
-      completeRequest(details.requestId);
-    };
-  } catch (err) {
-    console.error("CyberStrike: Failed to create filter", err);
-    // filterResponseData not available (e.g., cached response), send without body
-    completeRequest(details.requestId);
+  // The preferred filter was created in onBeforeRequest before cache lookup.
+  // Retry here only if early filter creation was unavailable.
+  if (!pendingResponseFilters.has(details.requestId)) {
+    const filter = startResponseCapture(details.requestId, responseData);
+    if (!filter) {
+      completeRequest(details.requestId, false);
+    }
   }
 
-  // Return blocking to allow filterResponseData to work
+  // Return blocking to let the response filter finish setup.
   return {};
 }
 
@@ -562,7 +584,11 @@ function onErrorOccurred(details) {
   // Request failed, send without response
   if (pendingRequests.has(details.requestId)) {
     console.log(`CyberStrike: Request ${details.requestId} failed: ${details.error}`);
-    completeRequest(details.requestId);
+    const pending = pendingRequests.get(details.requestId);
+    if (pending?.filter) {
+      try { pending.filter.disconnect(); } catch {}
+    }
+    completeRequest(details.requestId, false);
   }
 }
 
@@ -607,7 +633,7 @@ function startCapture(options = {}) {
   browser.webRequest.onBeforeRequest.addListener(
     onBeforeRequest,
     { urls: ["<all_urls>"] },
-    ["requestBody"]
+    ["blocking", "requestBody"]
   );
 
   browser.webRequest.onBeforeSendHeaders.addListener(
@@ -654,12 +680,16 @@ function stopCapture(clearSession = true) {
   // Stop filtering in-flight responses before releasing their buffers. Clearing
   // the maps first makes any late onstop/onerror callback harmless.
   const pending = Array.from(pendingRequests.values());
+  const filters = new Set(pendingResponseFilters.values());
+  for (const request of pending) {
+    if (request.filter) filters.add(request.filter);
+  }
   pendingRequests.clear();
   pendingResponses.clear();
   pendingBodies.clear();
-  for (const request of pending) {
-    if (!request.filter) continue;
-    try { request.filter.disconnect(); } catch {}
+  pendingResponseFilters.clear();
+  for (const filter of filters) {
+    try { filter.disconnect(); } catch {}
   }
 
   if (clearSession) {
