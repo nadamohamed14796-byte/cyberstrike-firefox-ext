@@ -230,7 +230,7 @@ test("stopping capture disconnects in-flight filters and releases pending buffer
   assert.equal(disconnected.length, 1);
   assert.equal(removed.length, 5);
   assert.equal(writes.at(-1).isCapturing, false);
-  assert.deepEqual(writes.at(-1).containerCredentials, {});
+  assert.equal(Object.keys(writes.at(-1).containerCredentials).length, 0);
 });
 
 test("popup HTML escaping protects data returned from the captured target", () => {
