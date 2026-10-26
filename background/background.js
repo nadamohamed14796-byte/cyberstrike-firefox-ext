@@ -574,7 +574,7 @@ function onCompleted(details) {
     if (pending.filter) {
       try { pending.filter.disconnect(); } catch (e) {}
     }
-    completeRequest(details.requestId);
+    completeRequest(details.requestId, false);
   }
 }
 
