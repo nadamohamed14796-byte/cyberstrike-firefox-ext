@@ -243,12 +243,12 @@ async function syncCredentialHeaders(credentialID, newHeaders) {
 
 // --- Server Communication ---
 
-async function sendToServer(rawRequest, containerId, response) {
+async function sendToServer(rawRequest, containerId, response, scheme) {
   const mapping = containerCredentials[containerId];
 
   if (sessionID) {
     try {
-      await sendIngest(rawRequest, sessionID, mapping?.credentialID, response);
+      await sendIngest(rawRequest, sessionID, mapping?.credentialID, response, scheme);
     } catch (err) {
       console.error("CyberStrike: Failed to send request:", err.message);
     }
@@ -261,7 +261,7 @@ async function sendToServer(rawRequest, containerId, response) {
     createdSessionPromise = true;
     sessionInitPromise = (async () => {
       try {
-        await sendIngest(rawRequest, null, mapping?.credentialID, response);
+        await sendIngest(rawRequest, null, mapping?.credentialID, response, scheme);
         return sessionID;
       } catch (err) {
         sessionInitPromise = null;
@@ -273,15 +273,19 @@ async function sendToServer(rawRequest, containerId, response) {
   try {
     await sessionInitPromise;
     if (!createdSessionPromise && sessionID) {
-      await sendIngest(rawRequest, sessionID, mapping?.credentialID, response);
+      await sendIngest(rawRequest, sessionID, mapping?.credentialID, response, scheme);
     }
   } catch (err) {
     console.error("CyberStrike: Failed to send request:", err.message);
   }
 }
 
-async function sendIngest(rawRequest, sid, credentialID, response) {
+async function sendIngest(rawRequest, sid, credentialID, response, scheme) {
   const payload = { text: rawRequest };
+
+  // The HTTP request line is origin-form, so preserve the original URL scheme
+  // explicitly instead of forcing the server to infer it from Host/:80.
+  if (scheme === "http" || scheme === "https") payload.scheme = scheme;
 
   if (sid) {
     payload.sessionID = sid;
@@ -378,7 +382,7 @@ function completeRequest(requestId) {
   }
 
   // Send to server
-  sendToServer(pending.rawRequest, pending.containerId, response).catch((err) => {
+  sendToServer(pending.rawRequest, pending.containerId, response, pending.scheme).catch((err) => {
     console.error("CyberStrike: Send failed:", err.message);
   });
 }
@@ -457,6 +461,7 @@ function onBeforeSendHeaders(details) {
   pendingRequests.set(details.requestId, {
     rawRequest,
     containerId,
+    scheme: new URL(details.url).protocol === "http:" ? "http" : "https",
     timestamp: Date.now(),
   });
 
