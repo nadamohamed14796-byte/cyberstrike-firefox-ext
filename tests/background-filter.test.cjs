@@ -233,6 +233,119 @@ test("stopping capture disconnects in-flight filters and releases pending buffer
   assert.equal(Object.keys(writes.at(-1).containerCredentials).length, 0);
 });
 
+test("response filter failure disconnects instead of truncating the page", () => {
+  const start = source.indexOf("function onHeadersReceived(details)");
+  const end = source.indexOf("function onCompleted(details)", start);
+  assert.notEqual(start, -1, "onHeadersReceived must exist");
+  assert.notEqual(end, -1, "onCompleted must follow onHeadersReceived");
+
+  const completed = [];
+  const closes = [];
+  const disconnects = [];
+  const filter = {
+    write() {},
+    close() { closes.push(true); },
+    disconnect() { disconnects.push(true); },
+  };
+  const pendingRequests = new Map([
+    ["req-1", { rawRequest: "GET / HTTP/1.1", containerId: "firefox-default", scheme: "https" }],
+  ]);
+  const pendingResponses = new Map();
+  const context = vm.createContext({
+    browser: { webRequest: { filterResponseData: () => filter } },
+    console: { log() {}, error() {} },
+    isCapturing: true,
+    pendingRequests,
+    pendingResponses,
+    extractResponseHeaders: () => ({}),
+    appendResponseChunk() {},
+    completeRequest: (id) => completed.push(id),
+  });
+  vm.runInContext(source.slice(start, end), context, {
+    filename: "background/filter-error-under-test.js",
+  });
+
+  context.onHeadersReceived({ requestId: "req-1", statusCode: 200, responseHeaders: [] });
+  filter.onerror(new Error("capture failed"));
+
+  assert.deepEqual(disconnects, [true]);
+  assert.deepEqual(closes, []);
+  assert.deepEqual(completed, ["req-1"]);
+});
+
+test("unauthorized ingest response does not disable response capture", async () => {
+  const start = source.indexOf("async function sendIngest(");
+  const end = source.indexOf("// --- Complete Request with Response ---", start);
+  assert.notEqual(start, -1, "sendIngest must exist");
+  assert.notEqual(end, -1, "completeRequest must follow sendIngest");
+
+  const requests = [];
+  const context = vm.createContext({
+    serverUrl: "http://127.0.0.1:4096",
+    serverAuthHeaders: {},
+    sessionID: "session-1",
+    requestCount: 0,
+    serverSupportsResponse: true,
+    console: { log() {}, error() {} },
+    browser: {
+      storage: { local: { set: async () => {} } },
+      runtime: { sendMessage: async () => ({}) },
+    },
+    fetch: async (_url, options) => {
+      requests.push(options);
+      return { ok: false, status: 401, text: async () => "Unauthorized" };
+    },
+  });
+  vm.runInContext(source.slice(start, end), context, {
+    filename: "background/ingest-auth-under-test.js",
+  });
+
+  await context.sendIngest("GET / HTTP/1.1", "session-1", null, { status: 200, body: "ok" }, "https");
+
+  assert.equal(requests.length, 1, "do not retry an authentication failure");
+  assert.equal(context.serverSupportsResponse, true);
+  assert.ok(JSON.parse(requests[0].body).response, "the original request should retain its response body");
+});
+
+test("server error compatibility retry omits the response only after HTTP 500", async () => {
+  const start = source.indexOf("async function sendIngest(");
+  const end = source.indexOf("// --- Complete Request with Response ---", start);
+  assert.notEqual(start, -1, "sendIngest must exist");
+  assert.notEqual(end, -1, "completeRequest must follow sendIngest");
+
+  const requests = [];
+  const replies = [
+    { ok: false, status: 500, text: async () => "response unsupported" },
+    { ok: true, status: 200, json: async () => ({ sessionID: "session-1" }) },
+  ];
+  const context = vm.createContext({
+    serverUrl: "http://127.0.0.1:4096",
+    serverAuthHeaders: {},
+    sessionID: "session-1",
+    requestCount: 0,
+    serverSupportsResponse: true,
+    console: { log() {}, error() {} },
+    browser: {
+      storage: { local: { set: async () => {} } },
+      runtime: { sendMessage: async () => ({}) },
+    },
+    fetch: async (_url, options) => {
+      requests.push(options);
+      return replies.shift();
+    },
+  });
+  vm.runInContext(source.slice(start, end), context, {
+    filename: "background/ingest-response-fallback-under-test.js",
+  });
+
+  await context.sendIngest("GET / HTTP/1.1", "session-1", null, { status: 200, body: "ok" }, "https");
+
+  assert.equal(requests.length, 2);
+  assert.ok(JSON.parse(requests[0].body).response);
+  assert.equal(Object.hasOwn(JSON.parse(requests[1].body), "response"), false);
+  assert.equal(context.serverSupportsResponse, false);
+});
+
 test("popup HTML escaping protects data returned from the captured target", () => {
   const popupPath = path.join(__dirname, "..", "popup", "popup.js");
   const popup = fs.readFileSync(popupPath, "utf8");
